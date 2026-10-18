@@ -3,7 +3,8 @@
 % Модельная струя (сглаженный излом, smoothEps = 0.03), St = 0.5, m = 0,
 % M = 0.9 и 0.4. Варианты:
 %   A - обычная нормировка по всем переменным (normVars = 1:5, как раньше);
-%   B - нормировка по давлению (normVars = 'p');
+%   B - нормировка по давлению в области струи (normVars = 'p', rNorm = 2) -
+%       рекомендуемый вариант;
 %   C - alpha из LST (lst_jet) там, где оно действительно, далее - нормировка
 %       по давлению.
 % (Вариант rNorm = 2 тоже проверялся: он совпадает с A - причина второго
@@ -25,7 +26,7 @@ for iM = 1:numel(Ms)
     mf = meanflow_model(M, 1, 1.4, 0.03);
     o  = base; o.M = M;
     rA = pse_jet(mf, St, m, o);
-    o.normVars = 'p';
+    o.normVars = 'p'; o.rNorm = 2;
     rB = pse_jet(mf, St, m, o);
     src = struct('x_all', {{rA.x}}, 'alpha_all', {{rA.alpha}}, 'St_array', St, ...
                  'm', m, 'M', M, 'Tinf', 1, 'gam', 1.4);
@@ -33,7 +34,7 @@ for iM = 1:numel(Ms)
     o.alphaPrescribed = L;
     rC = pse_jet(mf, St, m, o);
 
-    R  = {rA, rB, rC}; names = {'A: норма 1:5', 'B: норма p', 'C: alpha LST'};
+    R  = {rA, rB, rC}; names = {'A: норма 1:5', 'B: норма p, r<2', 'C: alpha LST'};
     x  = rA.x;
     fprintf('\nM = %.1f, St = %.2f:  LST: нейтр. x = %.2f, alpha_LST используется при x <= %.2f\n', ...
         M, St, L.x_neutral, max(x(rC.alphaSource == 1)));
