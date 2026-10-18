@@ -97,6 +97,8 @@ function out = lst_jet(mf, src, opts)
 %   .delta_all{k}  [1 x Nx]  оценка толщины слоя смешения
 %   .dbranch_all{k} [1 x Nx] |alpha - omega/U_max|/(omega/U_max): близость к точке ветвления
 %                            непрерывного спектра (при < 0.03 мода сливается с ним)
+%   .continuum_all{k} [1 x Nx] true - Im alpha = 0 с машинной точностью: найдено
+%                            значение непрерывного спектра, а не мода (недостоверно)
 %   .width_all{k}  [1 x Nx]  ширина w горба контура (сужается, чтобы не задевать полюса профиля)
 %   .polesCrossed_all{k} [1 x Nx], .newton_all{k} [1 x Nx] (1 - сошёлся Ньютон)
 %   .x_neutral(k)  x, где Im alpha меняет знак (NaN, если не меняет)
@@ -171,7 +173,7 @@ out.r_grid = sr;
 out.x_all = cell(1, nSt); out.alpha_all = cell(1, nSt); out.alphaPSE_all = cell(1, nSt);
 out.P_all_St = cell(1, nSt); out.r_contour_all = cell(1, nSt);
 out.rcrit_all = cell(1, nSt); out.amp_all = cell(1, nSt); out.delta_all = cell(1, nSt);
-out.polesCrossed_all = cell(1, nSt); out.width_all = cell(1, nSt); out.dbranch_all = cell(1, nSt); out.newton_all = cell(1, nSt);
+out.polesCrossed_all = cell(1, nSt); out.width_all = cell(1, nSt); out.dbranch_all = cell(1, nSt); out.continuum_all = cell(1, nSt); out.newton_all = cell(1, nSt);
 out.Q_all = cell(1, nSt);
 out.x_neutral = nan(1, nSt); out.sigma = zeros(1, nSt);
 
@@ -292,6 +294,12 @@ for kk = 1:nSt
                      '  спектра ядра) - мода сливается с непрерывным спектром, далее результат\n' ...
                      '  зависит от контура и физического смысла не имеет\n'], xs(imrg));
         end
+        icn = find(abs(imag(alpha)) < 1e-6*abs(alpha));
+        if ~isempty(icn)
+            warning('lst_jet:continuum', ['в %d сечениях (x = %s) Im alpha = 0 с машинной ' ...
+                'точностью: решение попало на непрерывный спектр, а не на моду К-Г ' ...
+                '(continuum_all = true)'], numel(icn), mat2str(xs(icn), 3));
+        end
         if max(npole) > 0
             warning('lst_jet:poles', ['в %d сечениях контур пересекает полюса аналитического продолжения ' ...
                 'профиля (излом/разрыв профиля?) - результат там недостоверен'], sum(npole > 0));
@@ -300,7 +308,7 @@ for kk = 1:nSt
     out.x_all{kk} = xs; out.alpha_all{kk} = alpha; out.alphaPSE_all{kk} = aPSE;
     out.P_all_St{kk} = P; out.r_contour_all{kk} = RC; out.rcrit_all{kk} = rcr;
     out.amp_all{kk} = amp; out.delta_all{kk} = dlt;
-    out.dbranch_all{kk} = dbr; out.width_all{kk} = wused; out.polesCrossed_all{kk} = npole; out.newton_all{kk} = nwt; out.sigma(kk) = sigma;
+    out.continuum_all{kk} = abs(imag(alpha)) < 1e-6*abs(alpha); out.dbranch_all{kk} = dbr; out.width_all{kk} = wused; out.polesCrossed_all{kk} = npole; out.newton_all{kk} = nwt; out.sigma(kk) = sigma;
     if storeQ, out.Q_all{kk} = Qs; end
 end
 
@@ -308,11 +316,11 @@ if ~isempty(saveFile)
     x_all = out.x_all; alpha_all = out.alpha_all; alphaPSE_all = out.alphaPSE_all; %#ok<NASGU>
     P_all_St = out.P_all_St; r_contour_all = out.r_contour_all; r_grid = out.r_grid; %#ok<NASGU>
     rcrit_all = out.rcrit_all; amp_all = out.amp_all; delta_all = out.delta_all; %#ok<NASGU>
-    polesCrossed_all = out.polesCrossed_all; width_all = out.width_all; dbranch_all = out.dbranch_all; x_neutral = out.x_neutral; %#ok<NASGU>
+    polesCrossed_all = out.polesCrossed_all; width_all = out.width_all; dbranch_all = out.dbranch_all; continuum_all = out.continuum_all; x_neutral = out.x_neutral; %#ok<NASGU>
     sigma = out.sigma; St_array = out.St; Nr = N; gam = out.gamma; %#ok<NASGU>
     save(saveFile, 'x_all', 'alpha_all', 'alphaPSE_all', 'P_all_St', ...
         'r_contour_all', 'r_grid', 'rcrit_all', 'amp_all', 'delta_all', ...
-        'polesCrossed_all', 'width_all', 'dbranch_all', 'x_neutral', 'sigma', 'St_array', 'm', 'M', ...
+        'polesCrossed_all', 'width_all', 'dbranch_all', 'continuum_all', 'x_neutral', 'sigma', 'St_array', 'm', 'M', ...
         'Tinf', 'gam', 'Nr', '-v7');
     if verbose, fprintf('LST: результат сохранён в %s\n', saveFile); end
 end

@@ -49,7 +49,33 @@ function res = pse_jet(mf, St, m, opts)
 %                       ограничение на шаг                          (false)
 %            .tol       точность итераций по alpha                  (1e-8)
 %            .maxIter   макс. число итераций по alpha на шаге       (30)
-%            .normVars  переменные в условии нормировки, подмнож. 1:5 (1:5)
+%            .normVars  переменные в условии нормировки, подмнож. 1:5, или
+%                       'p' - нормировка по давлению p = (rho*T'+T*rho')/(gamma*M^2).
+%                       После максимума пакета норма по 1:5 определяется
+%                       нейтральными конвективными (энтропийными/вихревыми)
+%                       возмущениями, и alpha перестаёт описывать волну К-Г;
+%                       'p' следит за давлением волны                (1:5)
+%            .rNorm     условие нормировки интегрируется только по r <= rNorm
+%                       (Inf - вся область). Рекомендуется ~2: после
+%                       максимума пакета иначе alpha определяется слабым
+%                       внешним (акустическим) полем, а не волной К-Г  (Inf)
+%            .alphaPrescribed  заданное извне alpha(x): итерации нормировки
+%                       там отключаются. Варианты:
+%                         - mat-файл / структура lst_jet или pse_jet
+%                           (x_all, alpha_all, St_array или St; для lst_jet
+%                           учитываются dbranch_all и polesCrossed_all);
+%                         - структура с полями x, alpha (для всех St) или
+%                           ячейка таких структур по St;
+%                         - функция @(x, St) -> alpha (NaN - не задано)  ([])
+%            .alphaOutside  что делать после конца заданного alpha:
+%                       'normalize' - обычная нормировка, 'freeze' -
+%                       последнее заданное значение          ('normalize')
+%            .alphaBranchTol  для данных lst_jet: alpha считается
+%                       недействительным, начиная с первого сечения, где
+%                       dbranch < alphaBranchTol (слияние с непрерывным
+%                       спектром)                                   (0.03)
+%            .rEff      радиусы для вывода "наблюдаемого" волнового числа
+%                       alpha_eff(x, r0) = -i d/dx ln p'(x, r0)      ([])
 %            .alphaGuess  вектор начальных приближений alpha(x0) для
 %                       каждого St (NaN -> автоматический выбор моды K-H) ([])
 %            .cphRange  диапазон фазовой скорости моды K-H, доли max(U) ([0.2 2])
@@ -74,6 +100,9 @@ function res = pse_jet(mf, St, m, opts)
 %                      Re{ p * exp(i*m*theta - i*omega*t) }
 %   .q      [5*Nr x Nx] (если storeQ) все функции формы
 %   .converged [1 x Nx] признак сходимости итераций по alpha
+%   .alphaSource [1 x Nx] 0 - нормировка, 1 - заданное alpha, 2 - заморожено
+%   .alphaEff  [numel(rEff) x Nx]  -i d/dx ln p'(x, rEff) (если задан rEff)
+%   .rEff
 %   .alphaLST           собственное значение в x0
 
 if nargin < 4, opts = struct(); end
@@ -88,10 +117,17 @@ kap = 1/(gam*opts.M^2);
 N  = numel(r);
 DR = kron(eye(5), Dr);
 % веса квадратуры для  int f r dr
+normP = ischar(opts.normVars) && strcmpi(opts.normVars, 'p');
+Wr = wq(:).*r(:);  Wr(r(:) > opts.rNorm) = 0;     % для нормировки по давлению
 W  = repmat(wq(:).*r(:), 5, 1);
 wmask = zeros(5*N,1);
-for v = opts.normVars(:)', wmask((v-1)*N+(1:N)) = 1; end
+if normP
+    wmask(:) = 1;
+else
+    for v = opts.normVars(:)', wmask((v-1)*N+(1:N)) = 1; end
+end
 W = W.*wmask;
+W(repmat(r(:) > opts.rNorm, 5, 1)) = 0;
 ip = @(a,b) sum(W.*conj(a).*b);
 [bcIdx, bcRows] = boundary_rows(N, m, Dr);
 
@@ -136,6 +172,14 @@ for k = 1:numel(St)
     q0 = q0*(opts.amp/ph0(imx));
 
     % --- 4. маршевание --------------------------------------------------
+    ap = prescribed_alpha(opts, St(k), x);     % NaN, где alpha не задано
+    if opts.verbose && any(isfinite(ap))
+        fi = find(isfinite(ap));
+        fprintf('  заданное alpha используется при x = %.3f .. %.3f (%d шагов)\n', ...
+            x(fi(1)), x(fi(end)), numel(fi));
+    end
+    lastP = find(isfinite(ap), 1, 'last');
+    asrc  = zeros(1, nst);
     Q     = zeros(5*N, nst);  Q(:,1) = q0;
     alpha = zeros(1, nst);    alpha(1) = alpha0;
     conv  = true(1, nst);
@@ -156,13 +200,33 @@ for k = 1:numel(St)
         % невязка условия нормировки  F(a) = <q, dq/dx>/<q, q> = 0:
         % первый шаг - стандартная поправка a - i*F, далее метод секущих
         % (простая итерация сходится медленно/расходится при малом dx)
+        afix = NaN;
+        if isfinite(ap(n))
+            afix = ap(n); asrc(n) = 1;
+        elseif strcmpi(opts.alphaOutside, 'freeze') && ~isempty(lastP) && n > lastP
+            afix = ap(lastP); asrc(n) = 2;
+        end
+        if isfinite(afix)
+            Mat = L0 + 1i*afix*C + Cx/dx;
+            Mat(bcIdx, :) = bcRows;
+            qn = Mat\rhs;
+            alpha(n) = afix;
+            Q(:, n)  = qn;
+            PH(:, n) = kap*(s.rho.*qn(4*N+1:5*N) + s.T.*qn(1:N));
+            continue
+        end
         a = alpha(n-1);
         ok = false; aOld = []; FOld = [];
         for it = 1:opts.maxIter
             Mat = L0 + 1i*a*C + Cx/dx;
             Mat(bcIdx, :) = bcRows;
             qn = Mat\rhs;
-            F  = ip(qn, (qn - qp)/dx)/ip(qn, qn);
+            if normP
+                pn = kap*(s.rho.*qn(4*N+1:5*N) + s.T.*qn(1:N));
+                F  = sum(Wr.*conj(pn).*(pn - PH(:, n-1)))/dx/sum(Wr.*abs(pn).^2);
+            else
+                F  = ip(qn, (qn - qp)/dx)/ip(qn, qn);
+            end
             if isempty(aOld) || F == FOld
                 da = -1i*F;
             else
@@ -183,6 +247,11 @@ for k = 1:numel(St)
 
     phase = cumtrapz(x, alpha);
     P = PH .* repmat(exp(1i*phase), N, 1);
+    aeff = [];
+    if ~isempty(opts.rEff)
+        He   = interp_r(r, PH, opts.rEff(:));          % функция формы на rEff
+        aeff = repmat(alpha, numel(opts.rEff), 1) - 1i*dxrows(He, x)./He;
+    end
 
     rr = r;
     if ~isempty(opts.rOut)
@@ -202,6 +271,9 @@ for k = 1:numel(St)
     res(k).phat  = PH;
     res(k).p     = P;
     res(k).converged = conv;
+    res(k).alphaSource = asrc;
+    res(k).alphaEff = aeff;
+    res(k).rEff  = opts.rEff(:);
     if opts.storeQ
         res(k).q = Q; res(k).rq = r;
     end
@@ -502,6 +574,57 @@ Fo = interp1(r, real(F), ro, 'spline') + 1i*interp1(r, imag(F), ro, 'spline');
 Fo(ro > r(end) | ro < r(1), :) = 0;
 end
 
+function D = dxrows(F, x)
+% производная по x (2-й порядок, равномерная сетка) для каждой строки F
+D = zeros(size(F)); n = numel(x);
+if n < 3, D(:) = repmat((F(:,end) - F(:,1))/(x(end) - x(1)), 1, n); return; end
+h = x(2) - x(1);
+D(:, 2:n-1) = (F(:, 3:n) - F(:, 1:n-2))/(2*h);
+D(:, 1) = (-3*F(:, 1) + 4*F(:, 2) - F(:, 3))/(2*h);
+D(:, n) = (3*F(:, n) - 4*F(:, n-1) + F(:, n-2))/(2*h);
+end
+
+function ap = prescribed_alpha(opts, St, x)
+% заданное alpha в сечениях x; NaN там, где оно не задано/недействительно
+ap = nan(size(x));
+src = opts.alphaPrescribed;
+if isempty(src), return; end
+if ischar(src), src = load(src); end
+if isa(src, 'function_handle')
+    for n = 1:numel(x), ap(n) = src(x(n), St); end
+    return
+end
+if iscell(src)
+    error('pse_jet:alphaPrescribed', ['для ячейки структур {x, alpha} по St ' ...
+        'передайте её элемент для нужного St или используйте формат x_all/alpha_all']);
+end
+if isfield(src, 'x_all')
+    if isfield(src, 'St_array'), Sts = src.St_array; else Sts = src.St; end
+    k = find(abs(Sts(:) - St) < 1e-9, 1);
+    if isempty(k), return; end
+    xd = src.x_all{k}(:).'; ad = src.alpha_all{k}(:).';
+    valid = isfinite(ad);
+    if isfield(src, 'dbranch_all') && ~isempty(src.dbranch_all)
+        im = find(src.dbranch_all{k} < opts.alphaBranchTol & (1:numel(xd)) > 1, 1);
+        if ~isempty(im), valid(im:end) = false; end
+    end
+    if isfield(src, 'polesCrossed_all') && ~isempty(src.polesCrossed_all)
+        valid = valid & src.polesCrossed_all{k} == 0;
+    end
+    if isfield(src, 'continuum_all') && ~isempty(src.continuum_all)
+        valid = valid & ~src.continuum_all{k};
+    end
+elseif isfield(src, 'x') && isfield(src, 'alpha')
+    xd = src.x(:).'; ad = src.alpha(:).'; valid = isfinite(ad);
+else
+    error('pse_jet:alphaPrescribed', 'неизвестный формат opts.alphaPrescribed');
+end
+xd = xd(valid); ad = ad(valid);
+if numel(xd) < 2, return; end
+in = x >= xd(1) - 1e-12 & x <= xd(end) + 1e-12;
+ap(in) = interp1(xd, real(ad), x(in), 'linear') + 1i*interp1(xd, imag(ad), x(in), 'linear');
+end
+
 function opts = set_defaults(opts, mf, nSt)
 def = struct('M', 0.9, 'gamma', 1.4, 'Nr', 120, 'rmax', 15, ...
     'mapping', 'sinh', 'rc', 0.5, 'beta', 5, 'rmap', 1.0, ...
@@ -509,7 +632,8 @@ def = struct('M', 0.9, 'gamma', 1.4, 'Nr', 120, 'rmax', 15, ...
     'dropDpdx', false, 'tol', 1e-8, 'maxIter', 30, 'normVars', 1:5, ...
     'alphaGuess', [], 'cphRange', [0.2 2], 'amp', 1, 'interp', 'pchip', ...
     'storeQ', false, 'rOut', [], 'verbose', true, 'lstTol', 1e-2, ...
-    'minGrowth', 0.02);
+    'minGrowth', 0.02, 'rNorm', Inf, 'alphaPrescribed', [], ...
+    'alphaOutside', 'normalize', 'alphaBranchTol', 0.03, 'rEff', []);
 f = fieldnames(def);
 for i = 1:numel(f)
     if ~isfield(opts, f{i}) || (isempty(opts.(f{i})) && ~isempty(def.(f{i})))

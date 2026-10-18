@@ -7,8 +7,9 @@ function outFile = make_pse_mat(M, St, m, opts, outFile)
 %   outFile = make_pse_mat(M, St, m)
 %   outFile = make_pse_mat(M, St, m, opts, outFile)
 %
-%   opts - параметры pse_jet (кроме M); дополнительно opts.Tinf (1),
-%          opts.gamma (1.4). Значения по умолчанию - как в
+%   opts - параметры pse_jet (кроме M), в т.ч. rNorm, alphaPrescribed, rEff;
+%          дополнительно opts.Tinf (1), opts.gamma (1.4), opts.smoothEps (0 -
+%          исходная модель; > 0 - сглаженный излом, см. meanflow_model). Значения по умолчанию - как в
 %          example_new_mean_jet_to_mat.m.
 %   Файл сохраняется в формате -v7 (читается и MATLAB, и Octave).
 
@@ -22,17 +23,22 @@ end
 gam  = opts.gamma;
 Tinf = opts.Tinf;
 opts = rmfield(opts, 'Tinf');
+smE  = 0;
+if isfield(opts, 'smoothEps'), smE = opts.smoothEps; opts = rmfield(opts, 'smoothEps'); end
 opts.M = M;
 
-mf  = meanflow_model(M, Tinf, gam);
+mf  = meanflow_model(M, Tinf, gam, smE);
 res = pse_jet(mf, St, m, opts);
 
 nSt = numel(res);
 x_all = cell(1, nSt); P_all_St = cell(1, nSt); alpha_all = cell(1, nSt);
+alphaEff_all = cell(1, nSt); alphaSource_all = cell(1, nSt);
 for k = 1:nSt
     x_all{k}     = res(k).x;
     P_all_St{k}  = res(k).p;
     alpha_all{k} = res(k).alpha;
+    alphaEff_all{k}    = res(k).alphaEff;
+    alphaSource_all{k} = res(k).alphaSource;
 end
 r_grid   = res(1).r(:);
 St_array = [res.St];
@@ -44,7 +50,9 @@ if nargin < 5 || isempty(outFile)
     tagT = strrep(sprintf('%.2f', Tinf), '.', 'p');
     outFile = sprintf('pse_M%s_Tinf%s_m%d_St_sweep.mat', tagM, tagT, m);
 end
+rEff = res(1).rEff;
 save(outFile, 'x_all', 'r_grid', 'St_array', 'P_all_St', 'alpha_all', ...
+     'alphaEff_all', 'alphaSource_all', 'rEff', ...
      'M', 'Tinf', 'm', 'gam', 'R', 'Nr', '-v7');
 fprintf('MAT-файл сохранён: %s\n', outFile);
 end
